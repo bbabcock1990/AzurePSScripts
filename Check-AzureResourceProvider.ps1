@@ -1,4 +1,9 @@
+# This script checks the availability of a predefined list of Azure resource providers in a specified region.
+# It requires the Az PowerShell module to be installed.
+# It is designed to be self-contained and easy to use.
+
 function Select-AzureSubscription {
+    # Allows the user to select an Azure subscription from a list.
     try {
         $currentSub = (Get-AzContext).Subscription
         $subs = Get-AzSubscription | Sort-Object Name
@@ -12,7 +17,7 @@ function Select-AzureSubscription {
         Write-Host "═════════════════════" -ForegroundColor Yellow
         
         $menuItems = @()
-        for ($i = 0; $i -lt $subs.Count; $i++) {
+        for ($i = $i -lt $subs.Count; $i++) {
             $sub = $subs[$i]
             $selected = if ($sub.Id -eq $currentSub.Id) { "* " } else { "  " }
             Write-Host ("{0}[{1}] {2} ({3})" -f $selected, ($i + 1), $sub.Name, $sub.Id) -ForegroundColor $(if ($sub.Id -eq $currentSub.Id) { "Green" } else { "Gray" })
@@ -42,6 +47,7 @@ function Select-AzureSubscription {
 }
 
 function Test-AzureLogin {
+    # Tests if the user is logged into Azure and offers to change subscriptions.
     try {
         $context = Get-AzContext
         if (-not $context) {
@@ -67,6 +73,7 @@ function Test-AzureLogin {
 }
 
 function Show-Banner {
+    # Displays a welcome banner.
     $banner = @"
     
     ╔═══════════════════════════════════════════════════════════════╗
@@ -98,7 +105,138 @@ $global:ResourceProvidersToCheck = @(
     "microsoft.web/sites"
 )
 
+# New helper functions for modularity
+
+function Get-ResourceProviderInfo {
+    # Splits a provider string into its namespace and service type.
+    param (
+        [string]$ProviderString
+    )
+    $providerParts = $ProviderString.Trim() -split '/'
+    $normalizedProvider = $providerParts[0].Trim()
+    $serviceType = if ($providerParts.Count -gt 1) { $providerParts[1].Trim() } else { $null }
+    
+    return [PSCustomObject]@{
+        Namespace = $normalizedProvider
+        ServiceType = $serviceType
+    }
+}
+
+function Is-ServiceAvailableInRegion {
+    # Checks if a specific service type is available in a given region.
+    param (
+        [PSObject]$ServiceInfo,
+        [string]$NormalizedRegion
+    )
+    $locations = @()
+    if ($ServiceInfo.Locations) { $locations += $ServiceInfo.Locations }
+    if ($ServiceInfo.LocationMappings) { $locations += $ServiceInfo.LocationMappings.PhysicalLocation }
+    
+    $normalizedLocations = $locations | ForEach-Object { $_.ToLower().Replace(' ', '') }
+    $checkRegion = $NormalizedRegion.ToLower().Replace(' ', '')
+    
+    return $normalizedLocations -contains $checkRegion -or $locations -contains '*'
+}
+
+function Determine-ProviderAvailability {
+    # Determines the availability of a resource provider in a region.
+    param (
+        [string]$Provider,
+        [string]$NormalizedRegion,
+        [PSObject]$AvailableProviders
+    )
+    $providerInfo = Get-ResourceProviderInfo -ProviderString $Provider
+    $namespace = $providerInfo.Namespace
+    $serviceType = $providerInfo.ServiceType
+
+    $providerExists = $AvailableProviders | Where-Object { $_.ProviderNamespace -eq $namespace }
+    
+    if (-not $providerExists) {
+        return [PSCustomObject]@{
+            ResourceProvider = $Provider
+            Region = $NormalizedRegion
+            Available = $false
+            Error = "Provider not found"
+        }
+    }
+
+    if ($serviceType) {
+        $serviceInfo = $providerExists.ResourceTypes | Where-Object { $_.ResourceTypeName -eq $serviceType }
+        if (-not $serviceInfo) {
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = $NormalizedRegion
+                Available = $false
+                Error = "Service type not found"
+            }
+        }
+
+        # Check for global service
+        $isGlobal = ($serviceInfo.Locations.Count -eq 0) -or 
+                    ($serviceInfo.Locations -contains '*') -or 
+                    ($serviceInfo.Locations -contains 'global')
+        if ($isGlobal) {
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = "Global Service"
+                Available = $true
+                Error = "Available globally"
+            }
+        }
+        else {
+            $isAvailable = Is-ServiceAvailableInRegion -ServiceInfo $serviceInfo -NormalizedRegion $NormalizedRegion
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = $NormalizedRegion
+                Available = $isAvailable
+                Error = if (-not $isAvailable) { "Not available in region" } else { $null }
+            }
+        }
+    }
+    else {
+        # Provider-only check (no service type specified)
+        $isGlobal = $true
+        foreach ($resourceType in $providerExists.ResourceTypes) {
+            if (-not ($resourceType.ResourceTypeName -in @('privateDnsZones', 'dnszones', 'publicIPPrefixes'))) {
+                $locations = @()
+                if ($resourceType.Locations) { $locations += $resourceType.Locations }
+                if ($resourceType.LocationMappings) { $locations += $resourceType.LocationMappings.PhysicalLocation }
+                
+                if ($locations.Count -gt 0 -and 
+                    -not ($locations -contains '*') -and 
+                    -not ($locations -contains 'global')) {
+                    $isGlobal = $false
+                    break
+                }
+            }
+        }
+        
+        if ($isGlobal) {
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = "Global Service"
+                Available = $true
+                Error = "Available globally"
+            }
+        }
+        else {
+            # This logic can be refined for more precise provider-level checks.
+            # For simplicity, we check if at least one service is available in the region.
+            $isAvailable = $providerExists.ResourceTypes | Where-Object {
+                Is-ServiceAvailableInRegion -ServiceInfo $_ -NormalizedRegion $NormalizedRegion
+            }
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = $NormalizedRegion
+                Available = $isAvailable -ne $null
+                Error = if ($isAvailable -eq $null) { "No service types available in region" } else { $null }
+            }
+        }
+    }
+}
+
 function Test-ResourceProvider {
+    # The main function to test resource provider availability.
     param (
         [Parameter(Mandatory = $true)]
         [string[]]$ResourceProviders,
@@ -129,7 +267,7 @@ function Test-ResourceProvider {
         return
     }
 
-    # Get all resource providers
+    # Get all resource providers once to improve performance
     try {
         $availableProviders = Get-AzResourceProvider
     }
@@ -144,140 +282,27 @@ function Test-ResourceProvider {
             -PercentComplete (($currentProvider / $totalProviders) * 100)
 
         try {
-            # Split provider and service type
-            $providerParts = $provider.Trim() -split '/'
-            $normalizedProvider = $providerParts[0].Trim()
-            $serviceType = if ($providerParts.Count -gt 1) { $providerParts[1].Trim() } else { $null }
-            
-            # Check if provider exists
-            $providerInfo = $availableProviders | Where-Object { $_.ProviderNamespace -eq $normalizedProvider }
-            
-            if (-not $providerInfo) {
-                $results += [PSCustomObject]@{
-                    ResourceProvider = $provider
-                    Region = $normalizedRegion
-                    Available = $false
-                    Error = "Provider not found"
-                }
-                continue
-            }
+            # Use the new modular functions
+            $result = Determine-ProviderAvailability -Provider $provider -NormalizedRegion $normalizedRegion -AvailableProviders $availableProviders
+            $results += $result
 
-            # If service type is specified, validate it exists
-            if ($serviceType) {
-                $serviceInfo = $providerInfo.ResourceTypes | Where-Object { $_.ResourceTypeName -eq $serviceType }
-                if (-not $serviceInfo) {
+            # Check for Data Lake Gen 2 availability based on the parent provider's status
+            if ($provider -eq "microsoft.storage/storageaccounts") {
+                if ($result.Available -and $result.Region -ne "Global Service") {
+                    # Only add the child result if the parent is available in the region
                     $results += [PSCustomObject]@{
-                        ResourceProvider = $provider
+                        ResourceProvider = "$provider/datalakegen2"
+                        Region = $normalizedRegion
+                        Available = $true
+                        Error = "Data Lake Gen 2 supported"
+                    }
+                } else {
+                    # If parent provider is not available, the child is also not available
+                    $results += [PSCustomObject]@{
+                        ResourceProvider = "$provider/datalakegen2"
                         Region = $normalizedRegion
                         Available = $false
-                        Error = "Service type not found"
-                    }
-                    continue
-                }
-
-                # Enhanced global service detection
-                $locations = @()
-                if ($serviceInfo.Locations) { $locations += $serviceInfo.Locations }
-                if ($serviceInfo.LocationMappings) { $locations += $serviceInfo.LocationMappings.PhysicalLocation }
-                
-                # More comprehensive global service check
-                $isGlobal = $false
-                if ($locations.Count -eq 0 -or 
-                    $locations -contains '*' -or 
-                    $locations -contains 'global' -or
-                    ($locations | Where-Object { $_ -ne $null } | Measure-Object).Count -eq 0 -or
-                    ($serviceInfo.ResourceTypeName -in @('privateDnsZones', 'dnszones', 'publicIPPrefixes'))) {
-                    $isGlobal = $true
-                }
-
-                if ($isGlobal) {
-                    $results += [PSCustomObject]@{
-                        ResourceProvider = $provider
-                        Region = "Global Service"
-                        Available = $true
-                        Error = "Available globally"
-                    }
-                }
-                else {
-                    # For regional services
-                    $normalizedLocations = $locations | ForEach-Object { $_.ToLower().Replace(' ', '') }
-                    $checkRegion = $normalizedRegion.ToLower().Replace(' ', '')
-                    
-                    $isAvailable = $normalizedLocations -contains $checkRegion
-                    $results += [PSCustomObject]@{
-                        ResourceProvider = $provider
-                        Region = $normalizedRegion
-                        Available = $isAvailable
-                        Error = if (-not $isAvailable) { "Not available in region" } else { $null }
-                    }
-                }
-            }
-            else {
-                # For provider-only checks
-                $isGlobal = $true
-
-                # Check if any resource type under the provider is regional
-                foreach ($resourceType in $providerInfo.ResourceTypes) {
-                    $locations = @()
-                    if ($resourceType.Locations) { $locations += $resourceType.Locations }
-                    if ($resourceType.LocationMappings) { $locations += $resourceType.LocationMappings.PhysicalLocation }
-
-                    # Skip known global services
-                    if ($resourceType.ResourceTypeName -in @('privateDnsZones', 'dnszones', 'publicIPPrefixes')) {
-                        continue
-                    }
-
-                    if ($locations.Count -gt 0 -and 
-                        -not ($locations -contains '*') -and 
-                        -not ($locations -contains 'global')) {
-                        $isGlobal = $false
-                        break
-                    }
-                }
-
-                if ($isGlobal) {
-                    $results += [PSCustomObject]@{
-                        ResourceProvider = $normalizedProvider
-                        Region = "Global Service"
-                        Available = $true
-                        Error = "Available globally"
-                    }
-                }
-                else {
-                    # Check region availability for provider (existing code)
-                    $regionInfo = $providerInfo.ResourceTypes | ForEach-Object {
-                        $resourceType = $_
-                        # Some providers use Location, others use LocationMappings
-                        $locations = @()
-                        if ($resourceType.Locations) {
-                            $locations += $resourceType.Locations
-                        }
-                        if ($resourceType.LocationMappings) {
-                            $locations += $resourceType.LocationMappings.PhysicalLocation
-                        }
-                        
-                        # Normalize location names for comparison
-                        $normalizedLocations = $locations | ForEach-Object { $_.ToLower().Replace(' ', '') }
-                        $checkRegion = $normalizedRegion.ToLower().Replace(' ', '')
-                        
-                        if ($normalizedLocations -contains $checkRegion -or $locations -contains '*') {
-                            return $_
-                        }
-                    } | Select-Object -First 1
-
-                    $isGlobal = $locations -contains '*' -or ($locations.Count -eq 0)
-                    
-                    $results += [PSCustomObject]@{
-                        ResourceProvider = $normalizedProvider
-                        Region = if ($isGlobal) { "global" } else { $normalizedRegion }
-                        Available = $regionInfo -ne $null -or $isGlobal
-                        Error = if ($isGlobal) { 
-                            "Available globally" 
-                        } elseif (-not $regionInfo) { 
-                            "Not available in region" 
-                        } else { 
-                            $null 
-                        }
+                        Error = "Parent provider 'microsoft.storage/storageaccounts' not available"
                     }
                 }
             }
@@ -297,8 +322,14 @@ function Test-ResourceProvider {
     Write-Host "Resource Provider Availability Results" -ForegroundColor Cyan
     Write-Host "═══════════════════════════════════════════`n" -ForegroundColor Cyan
     
-    # Calculate statistics
+    # Define colors for output
+    $greenText = "`e[32m"
+    $redText = "`e[31m"
+    $resetText = "`e[0m"
+
+    # Calculate statistics based on the final results array
     $availableCount = ($results | Where-Object { $_.Available }).Count
+    $totalResults = $results.Count
     $globalCount = ($results | Where-Object { $_.Region -eq "Global Service" }).Count
     
     $results | ForEach-Object {
@@ -326,7 +357,7 @@ function Test-ResourceProvider {
     Write-Host "Global Services: " -NoNewline
     Write-Host $globalCount -ForegroundColor Cyan
     Write-Host "Not Available: " -NoNewline
-    Write-Host ($totalProviders - $availableCount) -ForegroundColor Red
+    Write-Host ($totalProviders - ($availableCount - ($results | Where-Object {$_.ResourceProvider -like "*/datalakegen2"}).Count)) -ForegroundColor Red
     Write-Host ""
 
     # Clear the progress bar
@@ -355,4 +386,4 @@ try {
 catch {
     Write-Error "Script execution failed: $_"
 }
-    exit 1
+exit 1
