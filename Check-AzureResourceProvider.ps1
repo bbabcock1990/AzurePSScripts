@@ -17,7 +17,7 @@ function Select-AzureSubscription {
         Write-Host "═════════════════════" -ForegroundColor Yellow
         
         $menuItems = @()
-        for ($i = $i -lt $subs.Count; $i++) {
+        for ($i = 0; $i -lt $subs.Count; $i++) {
             $sub = $subs[$i]
             $selected = if ($sub.Id -eq $currentSub.Id) { "* " } else { "  " }
             Write-Host ("{0}[{1}] {2} ({3})" -f $selected, ($i + 1), $sub.Name, $sub.Id) -ForegroundColor $(if ($sub.Id -eq $currentSub.Id) { "Green" } else { "Gray" })
@@ -102,7 +102,9 @@ $global:ResourceProvidersToCheck = @(
     "microsoft.operationalinsights/workspaces",
     "microsoft.recoveryservices/vaults",
     "microsoft.storage/storageaccounts",
-    "microsoft.web/sites"
+    "microsoft.storage/storageaccounts/datalakegen2",
+    "microsoft.web/sites",
+    "microsoft.databricks"
 )
 
 # New helper functions for modularity
@@ -222,14 +224,15 @@ function Determine-ProviderAvailability {
         else {
             # This logic can be refined for more precise provider-level checks.
             # For simplicity, we check if at least one service is available in the region.
-            $isAvailable = $providerExists.ResourceTypes | Where-Object {
+            $isAvailableResult = $providerExists.ResourceTypes | Where-Object {
                 Is-ServiceAvailableInRegion -ServiceInfo $_ -NormalizedRegion $NormalizedRegion
             }
+            $isAvailable = ($isAvailableResult.Count -gt 0)
             return [PSCustomObject]@{
                 ResourceProvider = $Provider
                 Region = $NormalizedRegion
-                Available = $isAvailable -ne $null
-                Error = if ($isAvailable -eq $null) { "No service types available in region" } else { $null }
+                Available = $isAvailable
+                Error = if (-not $isAvailable) { "No service types available in region" } else { $null }
             }
         }
     }
@@ -285,27 +288,6 @@ function Test-ResourceProvider {
             # Use the new modular functions
             $result = Determine-ProviderAvailability -Provider $provider -NormalizedRegion $normalizedRegion -AvailableProviders $availableProviders
             $results += $result
-
-            # Check for Data Lake Gen 2 availability based on the parent provider's status
-            if ($provider -eq "microsoft.storage/storageaccounts") {
-                if ($result.Available -and $result.Region -ne "Global Service") {
-                    # Only add the child result if the parent is available in the region
-                    $results += [PSCustomObject]@{
-                        ResourceProvider = "$provider/datalakegen2"
-                        Region = $normalizedRegion
-                        Available = $true
-                        Error = "Data Lake Gen 2 supported"
-                    }
-                } else {
-                    # If parent provider is not available, the child is also not available
-                    $results += [PSCustomObject]@{
-                        ResourceProvider = "$provider/datalakegen2"
-                        Region = $normalizedRegion
-                        Available = $false
-                        Error = "Parent provider 'microsoft.storage/storageaccounts' not available"
-                    }
-                }
-            }
         }
         catch {
             $results += [PSCustomObject]@{
@@ -357,7 +339,7 @@ function Test-ResourceProvider {
     Write-Host "Global Services: " -NoNewline
     Write-Host $globalCount -ForegroundColor Cyan
     Write-Host "Not Available: " -NoNewline
-    Write-Host ($totalProviders - ($availableCount - ($results | Where-Object {$_.ResourceProvider -like "*/datalakegen2"}).Count)) -ForegroundColor Red
+    Write-Host ($totalProviders - ($availableCount)) -ForegroundColor Red
     Write-Host ""
 
     # Clear the progress bar
