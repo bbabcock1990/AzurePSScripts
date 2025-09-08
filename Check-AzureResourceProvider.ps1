@@ -572,7 +572,7 @@ function Select-AzureSubscription {
         Write-Host "═════════════════════" -ForegroundColor Yellow
         
         $menuItems = @()
-        for ($i = 0 -lt $subs.Count; $i++) {
+        for ($i = 0; $i -lt $subs.Count; $i++) {
             $sub = $subs[$i]
             $selected = if ($sub.Id -eq $currentSub.Id) { "* " } else { "  " }
             Write-Host ("{0}[{1}] {2} ({3})" -f $selected, ($i + 1), $sub.Name, $sub.Id) -ForegroundColor $(if ($sub.Id -eq $currentSub.Id) { "Green" } else { "Gray" })
