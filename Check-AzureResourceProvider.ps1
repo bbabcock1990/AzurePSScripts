@@ -83,7 +83,15 @@ function Write-Log {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp [$Level] $Message"
     Add-Content -Path $global:LogFilePath -Value $logMessage
-    Write-Host $logMessage
+    if ($Level -eq "Error") {
+        Write-Host $logMessage -ForegroundColor Red
+    } elseif ($Level -eq "Warning") {
+        Write-Host $logMessage -ForegroundColor Yellow
+    } elseif ($Level -eq "Success") {
+        Write-Host $logMessage -ForegroundColor Green
+    } else {
+        Write-Host $logMessage
+    }
 }
 
 # ==============================================================================
@@ -98,19 +106,24 @@ function Test-AzureAvailability {
         [Parameter(Mandatory = $true)]
         [string]$Region
     )
+    Write-Log "Starting Azure availability check for region: $Region"
     $providerResults = @()
 
     # Validate and normalize region name
     try {
         $allLocations = Get-AzLocation
+        Write-Log "Fetched Azure locations."
         $matchedRegion = $allLocations | Where-Object { $_.Location -eq $Region -or $_.DisplayName -eq $Region }
         if (-not $matchedRegion) {
+            Write-Log "Invalid region '$Region' entered." "Error"
             Write-Error "Invalid region '$Region'. Valid regions are:"
             $allLocations | Select-Object Location, DisplayName | Format-Table
             return
         }
         $normalizedRegion = $matchedRegion.Location
+        Write-Log "Normalized region: $normalizedRegion"
     } catch {
+        Write-Log "Error validating region: $_" "Error"
         Write-Error "Error validating region: $_"
         return
     }
@@ -118,46 +131,54 @@ function Test-AzureAvailability {
     # Get region availability zone info
     try {
         $regionZoneInfo = Get-RegionZoneInfo -Region $normalizedRegion
+        Write-Log "Fetched region zone info for $normalizedRegion"
     } catch {
-        Write-Log "Failed to determine region zone info: $_" -Level "Warning"
+        Write-Log "Failed to determine region zone info: $_" "Warning"
         $regionZoneInfo = [PSCustomObject]@{ SupportsZones = $false; ZoneCount = 0; Zones = @() }
     }
 
     # Ensure Microsoft.Quota provider is registered
     $quotaProviderStatus = Get-AzResourceProvider -ProviderNamespace Microsoft.Quota -ErrorAction SilentlyContinue
     if ($null -eq $quotaProviderStatus -or $quotaProviderStatus.RegistrationState -ne "Registered") {
+        Write-Log "Registering Microsoft.Quota resource provider..."
         Write-Host "`nRegistering Microsoft.Quota resource provider...`n" -ForegroundColor Yellow
         Register-AzResourceProvider -ProviderNamespace Microsoft.Quota -ErrorAction Stop
         $timeout = New-TimeSpan -Minutes 5
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $isRegistered = $false
         do {
+            Write-Log "Checking registration status for Microsoft.Quota..."
             Write-Host "Checking registration status... Waiting for Microsoft.Quota to be Registered." -ForegroundColor Gray
             $providerStatus = Get-AzResourceProvider -ProviderNamespace Microsoft.Quota
             if ($providerStatus.RegistrationState -eq "Registered") {
                 $isRegistered = $true
+                Write-Log "Microsoft.Quota is now registered." "Success"
                 Write-Host "`nMicrosoft.Quota is now registered." -ForegroundColor Green
             } else {
                 Start-Sleep -Seconds 10
             }
         } while (-not $isRegistered -and $stopwatch.Elapsed -lt $timeout)
         if (-not $isRegistered) {
+            Write-Log "Failed to register Microsoft.Quota provider within the timeout period." "Error"
             Write-Error "Failed to register Microsoft.Quota provider within the timeout period."
             return
         }
     } else {
+        Write-Log "Microsoft.Quota is already registered. Skipping registration step." "Success"
         Write-Host "`nMicrosoft.Quota is already registered. Skipping registration step." -ForegroundColor Green
     }
 
     # Get all resource providers once for performance
     try {
         $availableProviders = Get-AzResourceProvider
+        Write-Log "Fetched all resource providers."
     } catch {
+        Write-Log "Error fetching resource providers: $_" "Error"
         Write-Error "Error fetching resource providers: $_"
         return
     }
 
-    # Check resource provider availability
+    Write-Log "Checking resource provider availability for $($ResourceProviders.Count) providers."
     Write-Host "`nChecking Resource Providers..." -ForegroundColor Cyan
     $totalProviders = $ResourceProviders.Count
     $currentProvider = 0
@@ -165,10 +186,13 @@ function Test-AzureAvailability {
         $currentProvider++
         Write-Progress -Activity "Checking Resource Providers" -Status "Processing $provider" `
             -PercentComplete (($currentProvider / $totalProviders) * 100)
+        Write-Log "Checking provider: $provider"
         try {
             $result = Determine-ProviderAvailability -Provider $provider -NormalizedRegion $normalizedRegion -AvailableProviders $availableProviders
             $providerResults += $result
+            Write-Log "Provider check result: $($result.Available) for $provider"
         } catch {
+            Write-Log "Error checking provider $provider : $_" "Error"
             $providerResults += [PSCustomObject]@{
                 ResourceProvider = $provider
                 Region = $normalizedRegion
@@ -179,11 +203,12 @@ function Test-AzureAvailability {
     }
     Write-Progress -Activity "Checking Resource Providers" -Completed
 
-    # Check VM SKUs
+    Write-Log "Checking VM SKU availability."
     $skuResults = Test-SkuAvailability -Region $normalizedRegion
 
-    # Output the results using a dedicated function (pass region zone info)
+    Write-Log "Formatting output table."
     Format-OutputTable -ProviderResults $providerResults -SkuResults $skuResults -Region $normalizedRegion -RegionZoneInfo $regionZoneInfo
+    Write-Log "Azure availability check completed for region: $Region" "Success"
 }
 
 # Helper: Determine if a SKU is truly available in a region/zone, considering Restrictions
@@ -225,13 +250,14 @@ function Test-SkuZoneAvailability {
 # Check VM SKU availability and quota
 function Test-SkuAvailability {
     param([string]$Region)
+    Write-Log "Starting VM SKU availability check for region: $Region"
     Write-Progress -Activity "Checking VM Sizes and Quota" -Completed
 
     $subscriptionId = (Get-AzContext).Subscription.Id
     $quotaScope = "/subscriptions/$subscriptionId/providers/Microsoft.Compute/locations/$Region"
 
-    # Use cached SKUs if available
     if (-not $global:CachedComputeSkus) {
+        Write-Log "Fetching compute SKUs for $Region"
         $global:CachedComputeSkus = Get-AzComputeResourceSku -Location $Region -ErrorAction Stop
     }
 
@@ -240,9 +266,9 @@ function Test-SkuAvailability {
     $results = foreach ($sku in $global:VmSkusToCheck) {
         try {
             $skuName = $sku.SKUName
+            Write-Log "Checking SKU: $skuName"
             $skuFound = $global:CachedComputeSkus | Where-Object { $_.Name -eq $skuName }
             if ($skuFound) {
-                # Use new helper to get truly available zones
                 $availableZones = Test-SkuZoneAvailability -SkuFound $skuFound -Region $Region
                 if (-not $availableZones) { $availableZones = @() }
                 $allZones = @()
@@ -254,7 +280,6 @@ function Test-SkuAvailability {
                     }
                 }
                 $allZones = ($allZones | Select-Object -Unique) | Where-Object { $_ -ne $null -and $_ -ne "" }
-                # Only call Sort-Zones if array is not empty
                 if ($allZones.Count -gt 0) {
                     $allZones = Sort-Zones -Zones $allZones
                 }
@@ -312,11 +337,13 @@ function Test-SkuAvailability {
                 $skuFamily = $skuFound.Family
                 while (-not $quota -and $retryCount -lt $global:MaxRetries) {
                     try {
+                        Write-Log "Checking quota for SKU family: $skuFamily"
                         $quota = Get-AzQuota -Scope $quotaScope -ResourceName "$skuFamily" -ErrorAction Stop
                         $quotaUsage = Get-AzQuotaUsage -Scope $quotaScope -Name "$skuFamily" -ErrorAction SilentlyContinue
                         break
                     } catch {
                         $retryCount++
+                        Write-Log "Retry $retryCount for quota check on $skuFamily" "Warning"
                         if ($retryCount -lt $global:MaxRetries) {
                             Start-Sleep -Seconds $global:RetryWaitSeconds
                         }
@@ -325,6 +352,8 @@ function Test-SkuAvailability {
                 $quotaLimit = if ($quota) { $quota.Limit.value } else { 0 }
                 $currentUsage = if ($quotaUsage) { $quotaUsage.UsageValue } else { 0 }
                 $remainingQuota = $quotaLimit - $currentUsage
+
+                Write-Log "SKU $skuName - AZ Support: $azSupport, Quota: $quotaLimit, Used: $currentUsage, Delta: $remainingQuota"
 
                 [PSCustomObject]@{
                     Workload = $sku.Workload
@@ -343,6 +372,7 @@ function Test-SkuAvailability {
                     Error = if ($azSupport -eq "Restricted") { "SKU is restricted in all zones for this region" } elseif (-not $quota) { "Unable to retrieve quota information" } else { $null }
                 }
             } else {
+                Write-Log "SKU $skuName not found in region $Region" "Warning"
                 [PSCustomObject]@{
                     Workload = $sku.Workload
                     SKU = $skuName
@@ -361,7 +391,7 @@ function Test-SkuAvailability {
                 }
             }
         } catch {
-            Write-Log "Error processing SKU $skuName : $_" -Level "Error"
+            Write-Log "Error processing SKU $skuName : $_" "Error"
             [PSCustomObject]@{
                 Workload = $sku.Workload
                 SKU = $skuName
@@ -380,6 +410,7 @@ function Test-SkuAvailability {
             }
         }
     }
+    Write-Log "Completed VM SKU availability check for region: $Region"
     return $results
 }
 
