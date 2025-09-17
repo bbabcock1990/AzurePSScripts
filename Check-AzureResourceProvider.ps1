@@ -1,14 +1,9 @@
 <#
 .SYNOPSIS
-    This script checks the availability of specified Azure resource providers and VM SKUs
-    in a given Azure region, including core quota checks for VM families.
+    Checks the availability of specified Azure resource providers and VM SKUs in a given Azure region, including core quota checks for VM families.
 
 .DESCRIPTION
-    The script first verifies that the required Az PowerShell modules are installed and
-    then prompts the user to log in or select a subscription. It checks if a list of
-    predefined resource providers and VM SKUs are available in a specified region.
-    For VM SKUs, it also checks the core quota limits and usage to determine if there
-    are enough cores available for a given workload.
+    This script verifies that required Az PowerShell modules are installed, prompts the user to log in or select a subscription, and checks if a list of predefined resource providers and VM SKUs are available in a specified region. For VM SKUs, it also checks the core quota limits and usage to determine if there are enough cores available for a given workload.
 
 .EXAMPLE
     PS C:\> .\Check-Azure-Providers.ps1
@@ -26,7 +21,7 @@
 # 1. SCRIPT CONFIGURATION - EDIT THESE VARIABLES TO CUSTOMIZE THE CHECKS
 # ==============================================================================
 
-# Define the list of Azure resource providers to check.
+# List of Azure resource providers to check.
 # Format: "namespace/serviceType" or "namespace" for a provider-level check.
 $global:ResourceProvidersToCheck = @(
     "microsoft.compute/disks",
@@ -48,152 +43,94 @@ $global:ResourceProvidersToCheck = @(
     "microsoft.storage/storageaccounts",
     "microsoft.storage/storageaccounts/datalakegen2",
     "microsoft.web/sites",
-    "microsoft.databricks"
+    "microsoft.databricks",
+    "Microsoft.ContainerService",
+    "Microsoft.Security"
 )
 
-# Define the list of VM SKUs to check, including the associated workload and required cores.
-$global:SKUsToCheck = @(
-    @{
-        SKUName = "Standard_D8as_v6";
-        Cores = 8;
-        ResourceType = "virtualMachines";
-        Workload = "AKS node pools"
-    },
-    @{
-        SKUName = "Standard_D4as_v6";
-        Cores = 4;
-        ResourceType = "virtualMachines";
-        Workload = "AKS node pools"
-    },
-    @{
-        SKUName = "Standard_D8as_v5";
-        Cores = 8;
-        ResourceType = "virtualMachines";
-        Workload = "AKS node pools"
-    },
-    @{
-        SKUName = "Standard_D4as_v5";
-        Cores = 4;
-        ResourceType = "virtualMachines";
-        Workload = "AKS node pools"
-    },
-     @{
-        SKUName = "Standard_D8as_v4";
-        Cores = 8;
-        ResourceType = "virtualMachines";
-        Workload = "AKS node pools"
-    },
-    @{
-        SKUName = "Standard_D4as_v4";
-        Cores = 4;
-        ResourceType = "virtualMachines";
-        Workload = "AKS node pools"
-    },
-    @{
-        SKUName = "Standard_D2ds_v4";
-        Cores = 2;
-        ResourceType = "MySqlFlexibleServers";
-        Workload = "MySQL DB"
-    },
-    @{
-        SKUName = "Standard_D4as_v6";
-        Cores = 4;
-        ResourceType = "virtualMachines";
-        Workload = "Kafka VM"
-    },
-    @{
-        SKUName = "Standard_D8as_v5";
-        Cores = 8;
-        ResourceType = "virtualMachines";
-        Workload = "Kafka VM"
-    },
-    @{
-        SKUName = "Standard_B8ms";
-        Cores = 8;
-        ResourceType = "virtualMachines";
-        Workload = "Jenkins Agent VM"
-    }
+# List of VM SKUs to check, including the associated workload and required cores.
+$global:VmSkusToCheck = @(
+    @{ SKUName = "Standard_D8as_v6"; Cores = 8; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
+    @{ SKUName = "Standard_D4as_v6"; Cores = 4; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
+    @{ SKUName = "Standard_D8as_v5"; Cores = 8; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
+    @{ SKUName = "Standard_D4as_v5"; Cores = 4; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
+    @{ SKUName = "Standard_D8as_v4"; Cores = 8; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
+    @{ SKUName = "Standard_D4as_v4"; Cores = 4; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
+    @{ SKUName = "Standard_D2ds_v4"; Cores = 2; ResourceType = "MySqlFlexibleServers"; Workload = "MySQL DB" },
+    @{ SKUName = "Standard_D4as_v6"; Cores = 4; ResourceType = "virtualMachines"; Workload = "Kafka VM" },
+    @{ SKUName = "Standard_D8as_v5"; Cores = 8; ResourceType = "virtualMachines"; Workload = "Kafka VM" },
+    @{ SKUName = "Standard_B8ms"; Cores = 8; ResourceType = "virtualMachines"; Workload = "Jenkins Agent VM" }
 )
 
-# Define required PowerShell modules.
-$global:RequiredModules = @("Az.Accounts", "Az.Compute", "Az.Resources", "Az.Quota")
+# Required PowerShell modules for this script.
+$global:RequiredAzModules = @("Az.Accounts", "Az.Compute", "Az.Resources", "Az.Quota")
 
-# Add logging configuration
-$global:LogFile = Join-Path $PSScriptRoot "AzureCheck_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+# Logging configuration
+$global:LogFilePath = Join-Path $PSScriptRoot "AzureCheck_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 $global:MaxRetries = 3
 $global:RetryWaitSeconds = 10
 
-# Add caching variables
-$global:CachedSkus = $null
+# Caching variables for performance
+$global:CachedComputeSkus = $null
 $global:CachedQuotas = @{}
 
+# Write a message to both log file and console
 function Write-Log {
-    param([string]$Message, [string]$Level = "Info")
+    param(
+        [string]$Message,
+        [string]$Level = "Info"
+    )
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp [$Level] $Message"
-    Add-Content -Path $global:LogFile -Value $logMessage
+    Add-Content -Path $global:LogFilePath -Value $logMessage
     Write-Host $logMessage
 }
 
 # ==============================================================================
 # 2. CORE FUNCTIONS
-#    These functions perform the primary logic of the script.
 # ==============================================================================
 
+# Main function to test resource provider and SKU availability
 function Test-AzureAvailability {
-    <#
-    .SYNOPSIS
-        The main function to test resource provider and SKU availability.
-
-    .DESCRIPTION
-        This function orchestrates the entire process. It validates the region,
-        registers the Quota provider, fetches all resource providers and SKUs,
-        and then calls helper functions to perform the checks.
-
-    .PARAMETER ResourceProviders
-        A string array of resource providers to check.
-
-    .PARAMETER Region
-        The Azure region to check for availability.
-    #>
     param (
         [Parameter(Mandatory = $true)]
         [string[]]$ResourceProviders,
-        
         [Parameter(Mandatory = $true)]
         [string]$Region
     )
-    
-    # Create arrays to store results
     $providerResults = @()
 
     # Validate and normalize region name
     try {
-        $locations = Get-AzLocation
-        $validRegion = $locations | Where-Object { $_.Location -eq $Region -or $_.DisplayName -eq $Region }
-        
-        if (-not $validRegion) {
+        $allLocations = Get-AzLocation
+        $matchedRegion = $allLocations | Where-Object { $_.Location -eq $Region -or $_.DisplayName -eq $Region }
+        if (-not $matchedRegion) {
             Write-Error "Invalid region '$Region'. Valid regions are:"
-            $locations | Select-Object Location, DisplayName | Format-Table
+            $allLocations | Select-Object Location, DisplayName | Format-Table
             return
         }
-        $normalizedRegion = $validRegion.Location
-    }
-    catch {
+        $normalizedRegion = $matchedRegion.Location
+    } catch {
         Write-Error "Error validating region: $_"
         return
     }
 
-    # Check if the Quota provider is already registered before attempting registration.
+    # Get region availability zone info
+    try {
+        $regionZoneInfo = Get-RegionZoneInfo -Region $normalizedRegion
+    } catch {
+        Write-Log "Failed to determine region zone info: $_" -Level "Warning"
+        $regionZoneInfo = [PSCustomObject]@{ SupportsZones = $false; ZoneCount = 0; Zones = @() }
+    }
+
+    # Ensure Microsoft.Quota provider is registered
     $quotaProviderStatus = Get-AzResourceProvider -ProviderNamespace Microsoft.Quota -ErrorAction SilentlyContinue
     if ($null -eq $quotaProviderStatus -or $quotaProviderStatus.RegistrationState -ne "Registered") {
         Write-Host "`nRegistering Microsoft.Quota resource provider...`n" -ForegroundColor Yellow
         Register-AzResourceProvider -ProviderNamespace Microsoft.Quota -ErrorAction Stop
-
         $timeout = New-TimeSpan -Minutes 5
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $isRegistered = $false
-
         do {
             Write-Host "Checking registration status... Waiting for Microsoft.Quota to be Registered." -ForegroundColor Gray
             $providerStatus = Get-AzResourceProvider -ProviderNamespace Microsoft.Quota
@@ -204,7 +141,6 @@ function Test-AzureAvailability {
                 Start-Sleep -Seconds 10
             }
         } while (-not $isRegistered -and $stopwatch.Elapsed -lt $timeout)
-
         if (-not $isRegistered) {
             Write-Error "Failed to register Microsoft.Quota provider within the timeout period."
             return
@@ -213,30 +149,26 @@ function Test-AzureAvailability {
         Write-Host "`nMicrosoft.Quota is already registered. Skipping registration step." -ForegroundColor Green
     }
 
-    # Get all resource providers once to improve performance
+    # Get all resource providers once for performance
     try {
         $availableProviders = Get-AzResourceProvider
-    }
-    catch {
+    } catch {
         Write-Error "Error fetching resource providers: $_"
         return
     }
-    
+
     # Check resource provider availability
     Write-Host "`nChecking Resource Providers..." -ForegroundColor Cyan
     $totalProviders = $ResourceProviders.Count
     $currentProvider = 0
-
     foreach ($provider in $ResourceProviders) {
         $currentProvider++
         Write-Progress -Activity "Checking Resource Providers" -Status "Processing $provider" `
             -PercentComplete (($currentProvider / $totalProviders) * 100)
-
         try {
             $result = Determine-ProviderAvailability -Provider $provider -NormalizedRegion $normalizedRegion -AvailableProviders $availableProviders
             $providerResults += $result
-        }
-        catch {
+        } catch {
             $providerResults += [PSCustomObject]@{
                 ResourceProvider = $provider
                 Region = $normalizedRegion
@@ -245,74 +177,170 @@ function Test-AzureAvailability {
             }
         }
     }
-
     Write-Progress -Activity "Checking Resource Providers" -Completed
-    
+
     # Check VM SKUs
     $skuResults = Test-SkuAvailability -Region $normalizedRegion
-    
-    # Output the results using a dedicated function
-    Format-OutputTable -ProviderResults $providerResults -SkuResults $skuResults -Region $normalizedRegion
+
+    # Output the results using a dedicated function (pass region zone info)
+    Format-OutputTable -ProviderResults $providerResults -SkuResults $skuResults -Region $normalizedRegion -RegionZoneInfo $regionZoneInfo
 }
 
-# Enhance Test-SkuAvailability with parallel processing
+# Helper: Determine if a SKU is truly available in a region/zone, considering Restrictions
+function Test-SkuZoneAvailability {
+    param(
+        [object]$SkuFound,
+        [string]$Region
+    )
+    # Get all zones for this SKU in the region
+    $zones = @()
+    if ($SkuFound.LocationInfo) {
+        foreach ($loc in $SkuFound.LocationInfo) {
+            if ($loc.Location -ieq $Region) {
+                if ($loc.Zones) { $zones += $loc.Zones }
+            }
+        }
+    }
+    $zones = ($zones | Select-Object -Unique) | Where-Object { $_ -ne $null -and $_ -ne "" }
+
+    # Remove zones that are restricted
+    $restrictedZones = @()
+    if ($SkuFound.Restrictions) {
+        foreach ($r in $SkuFound.Restrictions) {
+            # Restriction by zone
+            if ($r.Zones) { $restrictedZones += $r.Zones }
+            if ($r.RestrictionInfo -and $r.RestrictionInfo.Zones) { $restrictedZones += $r.RestrictionInfo.Zones }
+            # Restriction by region (all zones)
+            if ($r.Type -eq "Location" -or $r.ReasonCode -eq "NotAvailableInRegion") {
+                # All zones restricted
+                return @()
+            }
+        }
+    }
+    $restrictedZones = $restrictedZones | Select-Object -Unique
+    $availableZones = $zones | Where-Object { $_ -notin $restrictedZones }
+    return $availableZones
+}
+
+# Check VM SKU availability and quota
 function Test-SkuAvailability {
     param([string]$Region)
-
     Write-Progress -Activity "Checking VM Sizes and Quota" -Completed
-    
-    # Get subscription ID for quota scope
+
     $subscriptionId = (Get-AzContext).Subscription.Id
     $quotaScope = "/subscriptions/$subscriptionId/providers/Microsoft.Compute/locations/$Region"
-    
+
     # Use cached SKUs if available
-    if (-not $global:CachedSkus) {
-        $global:CachedSkus = Get-AzComputeResourceSku -Location $Region -ErrorAction Stop
+    if (-not $global:CachedComputeSkus) {
+        $global:CachedComputeSkus = Get-AzComputeResourceSku -Location $Region -ErrorAction Stop
     }
 
-    $results = foreach ($sku in $global:SKUsToCheck) {
+    $regionZoneInfo = Get-RegionZoneInfo -Region $Region
+
+    $results = foreach ($sku in $global:VmSkusToCheck) {
         try {
             $skuName = $sku.SKUName
-            $skuFound = $global:CachedSkus | Where-Object { $_.Name -eq $skuName }
-            
+            $skuFound = $global:CachedComputeSkus | Where-Object { $_.Name -eq $skuName }
             if ($skuFound) {
-                # Enhanced quota check with retry logic
+                # Use new helper to get truly available zones
+                $availableZones = Test-SkuZoneAvailability -SkuFound $skuFound -Region $Region
+                if (-not $availableZones) { $availableZones = @() }
+                $allZones = @()
+                if ($skuFound.LocationInfo) {
+                    foreach ($loc in $skuFound.LocationInfo) {
+                        if ($loc.Location -ieq $Region) {
+                            if ($loc.Zones) { $allZones += $loc.Zones }
+                        }
+                    }
+                }
+                $allZones = ($allZones | Select-Object -Unique) | Where-Object { $_ -ne $null -and $_ -ne "" }
+                # Only call Sort-Zones if array is not empty
+                if ($allZones.Count -gt 0) {
+                    $allZones = Sort-Zones -Zones $allZones
+                }
+                if ($availableZones.Count -gt 0) {
+                    $availableZones = Sort-Zones -Zones $availableZones
+                }
+
+                # Determine AZ support classification
+                if ($allZones.Count -eq 0) {
+                    $azSupport = "None"
+                } elseif ($availableZones.Count -eq 0) {
+                    $azSupport = "Restricted"
+                } elseif ($regionZoneInfo.SupportsZones) {
+                    $regionZones = $regionZoneInfo.Zones
+                    $missing = $regionZones | Where-Object { $_ -notin $availableZones }
+                    if ($missing.Count -eq 0 -and $regionZones.Count -gt 0) {
+                        $azSupport = "All"
+                    } else {
+                        $azSupport = "Some"
+                    }
+                } else {
+                    $azSupport = "SKU reports zones"
+                }
+                $azZonesText = if ($availableZones.Count -gt 0) { [string]::Join(', ', $availableZones) } else { "N/A" }
+
+                # Compute AZ-specific restrictions and explanations
+                $azExplanations = ""
+                try {
+                    $azExplanations = Get-AZExplanations -RegionZones $regionZoneInfo.Zones -SkuZones $availableZones -Restrictions $skuFound.Restrictions
+                } catch {
+                    $azExplanations = "Error evaluating AZ explanations"
+                }
+                if (-not $azExplanations) { $azExplanations = "" }
+
+                $azRestrictions = "None"
+                try {
+                    $azRestrictions = Get-AZRestrictions -Restrictions $skuFound.Restrictions `
+                        -LocationInfo $skuFound.LocationInfo `
+                        -Region $Region
+                } catch {
+                    $azRestrictions = "Error extracting AZ restrictions"
+                }
+
+                $restrictionText = "None"
+                try {
+                    $restrictionText = Format-SkuRestrictions -Restrictions $skuFound.Restrictions
+                } catch {
+                    $restrictionText = "Error formatting restrictions"
+                }
+
+                # Quota check with retry logic
                 $quota = $null
                 $quotaUsage = $null
                 $retryCount = 0
-                
-                # Get the SKU family for quota check
                 $skuFamily = $skuFound.Family
-                
                 while (-not $quota -and $retryCount -lt $global:MaxRetries) {
                     try {
                         $quota = Get-AzQuota -Scope $quotaScope -ResourceName "$skuFamily" -ErrorAction Stop
                         $quotaUsage = Get-AzQuotaUsage -Scope $quotaScope -Name "$skuFamily" -ErrorAction SilentlyContinue
                         break
-                    }
-                    catch {
+                    } catch {
                         $retryCount++
                         if ($retryCount -lt $global:MaxRetries) {
                             Start-Sleep -Seconds $global:RetryWaitSeconds
                         }
                     }
                 }
-
-                # Calculate quota and availability
                 $quotaLimit = if ($quota) { $quota.Limit.value } else { 0 }
                 $currentUsage = if ($quotaUsage) { $quotaUsage.UsageValue } else { 0 }
                 $remainingQuota = $quotaLimit - $currentUsage
-                
+
                 [PSCustomObject]@{
                     Workload = $sku.Workload
                     SKU = $skuName
                     Region = $Region
-                    Available = $true
+                    Available = ($azSupport -ne "Restricted")
                     "Quota Available" = $quotaLimit
                     "Used Cores" = $currentUsage
                     "Required Cores" = $sku.Cores
                     "Delta" = $remainingQuota
-                    Error = if (-not $quota) { "Unable to retrieve quota information" } else { $null }
+                    "AZ Support" = $azSupport
+                    "AZ Zones" = $azZonesText
+                    "AZ Explanations" = $azExplanations
+                    "AZ Restrictions" = $azRestrictions
+                    "Restrictions" = $restrictionText
+                    Error = if ($azSupport -eq "Restricted") { "SKU is restricted in all zones for this region" } elseif (-not $quota) { "Unable to retrieve quota information" } else { $null }
                 }
             } else {
                 [PSCustomObject]@{
@@ -324,11 +352,15 @@ function Test-SkuAvailability {
                     "Used Cores" = 0
                     "Required Cores" = $sku.Cores
                     "Delta" = 0
+                    "AZ Support" = "N/A"
+                    "AZ Zones" = "N/A"
+                    "AZ Explanations" = "N/A"
+                    "AZ Restrictions" = "N/A"
+                    "Restrictions" = "N/A"
                     Error = "SKU not available in region"
                 }
             }
-        }
-        catch {
+        } catch {
             Write-Log "Error processing SKU $skuName : $_" -Level "Error"
             [PSCustomObject]@{
                 Workload = $sku.Workload
@@ -339,130 +371,181 @@ function Test-SkuAvailability {
                 "Used Cores" = 0
                 "Required Cores" = $sku.Cores
                 "Delta" = 0
+                "AZ Support" = "Error"
+                "AZ Zones" = "N/A"
+                "AZ Explanations" = "Error"
+                "AZ Restrictions" = "Error"
+                "Restrictions" = "Error"
                 Error = $_.Exception.Message
             }
         }
     }
-    
     return $results
 }
 
-function Determine-ProviderAvailability {
-    <#
-    .SYNOPSIS
-        Determines the availability of a resource provider in a region.
-
-    .DESCRIPTION
-        This helper function checks if a specific resource provider or
-        service type is available within a given Azure region by examining
-        the properties of available resource providers.
-
-    .PARAMETER Provider
-        The resource provider string (e.g., "microsoft.compute/virtualmachines").
-
-    .PARAMETER NormalizedRegion
-        The normalized region name (e.g., "westus2").
-
-    .PARAMETER AvailableProviders
-        A collection of all available resource providers, fetched once for performance.
-    #>
-    param (
-        [string]$Provider,
-        [string]$NormalizedRegion,
-        [PSObject]$AvailableProviders
+# Add helper to extract zone-specific restriction details (returns concise string or "None")
+function Get-AZRestrictions {
+    param(
+        [Parameter(Mandatory = $false)]
+        [object[]]$Restrictions,
+        [Parameter(Mandatory = $false)]
+        [object]$LocationInfo,
+        [Parameter(Mandatory = $false)]
+        [string]$Region
     )
-    $providerInfo = Get-ResourceProviderInfo -ProviderString $Provider
-    $namespace = $providerInfo.Namespace
-    $serviceType = $providerInfo.ServiceType
-
-    $providerExists = $AvailableProviders | Where-Object { $_.ProviderNamespace -eq $namespace }
     
-    if (-not $providerExists) {
-        return [PSCustomObject]@{
-            ResourceProvider = $Provider
-            Region = $NormalizedRegion
-            Available = $false
-            Error = "Provider not found"
-        }
-    }
-
-    if ($serviceType) {
-        $serviceInfo = $providerExists.ResourceTypes | Where-Object { $_.ResourceTypeName -eq $serviceType }
-        if (-not $serviceInfo) {
-            return [PSCustomObject]@{
-                ResourceProvider = $Provider
-                Region = $NormalizedRegion
-                Available = $false
-                Error = "Service type not found"
-            }
-        }
-
-        # Check for global service
-        $isGlobal = ($serviceInfo.Locations.Count -eq 0) -or 
-                    ($serviceInfo.Locations -contains '*') -or 
-                    ($serviceInfo.Locations -contains 'global')
-        if ($isGlobal) {
-            return [PSCustomObject]@{
-                ResourceProvider = $Provider
-                Region = "Global Service"
-                Available = $true
-                Error = "Available globally"
-            }
-        }
-        else {
-            $isAvailable = Is-ServiceAvailableInRegion -ServiceInfo $serviceInfo -NormalizedRegion $NormalizedRegion
-            return [PSCustomObject]@{
-                ResourceProvider = $Provider
-                Region = $NormalizedRegion
-                Available = $isAvailable
-                Error = if (-not $isAvailable) { "Not available in region" } else { $null }
-            }
-        }
-    }
-    else {
-        # This branch handles provider-only checks without a specific service type.
-        $isGlobal = $true
-        foreach ($resourceType in $providerExists.ResourceTypes) {
-            if (-not ($resourceType.ResourceTypeName -in @('privateDnsZones', 'dnszones', 'publicIPPrefixes'))) {
-                $locations = @()
-                if ($resourceType.Locations) { $locations += $resourceType.Locations }
-                if ($resourceType.LocationMappings) { $locations += $resourceType.LocationMappings.PhysicalLocation }
-                
-                if ($locations.Count -gt 0 -and 
-                    -not ($locations -contains '*') -and 
-                    -not ($locations -contains 'global')) {
-                    $isGlobal = $false
-                    break
+    $entries = @()
+    
+    # First check LocationInfo for zone capabilities
+    if ($LocationInfo) {
+        $locationEntry = $LocationInfo | Where-Object { $_.Location -ieq $Region }
+        if ($locationEntry) {
+            if ($locationEntry.ZoneDetails) {
+                foreach ($zd in $locationEntry.ZoneDetails) {
+                    # Check for zone-specific status
+                    if ($zd.Zones) {
+                        $availableZones = $zd.Zones
+                        $entries += ("Available in zones: $([string]::Join(',', $availableZones))")
+                    }
+                    # Check capabilities
+                    if ($zd.Capabilities) {
+                        foreach ($cap in $zd.Capabilities) {
+                            switch ($cap.Name) {
+                                "UnavailableZone" {
+                                    $entries += ("Zone ${cap.Value} unavailable for this SKU")
+                                }
+                                "ZoneDetails" {
+                                    if ($cap.Value -match "^NotSelected|NotSupported$") {
+                                        $entries += ("Zone support: ${cap.Value}")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        
-        if ($isGlobal) {
-            return [PSCustomObject]@{
-                ResourceProvider = $Provider
-                Region = "Global Service"
-                Available = $true
-                Error = "Available globally"
+    }
+
+    # Then check explicit restrictions
+    if ($Restrictions) {
+        foreach ($r in $Restrictions) {
+            $restrictedZones = @()
+            
+            # Get zones from all possible sources
+            if ($r.Zones) { $restrictedZones += $r.Zones }
+            if ($r.RestrictionInfo.Zones) { $restrictedZones += $r.RestrictionInfo.Zones }
+            
+            if ($restrictedZones.Count -gt 0) {
+                $reason = if ($r.ReasonCode) {
+                    switch ($r.ReasonCode) {
+                        "NotAvailableForSubscription" { "Not available in subscription" }
+                        "NotAvailableInRegion" { "Not available in region" }
+                        default { $r.ReasonCode }
+                    }
+                } elseif ($r.Type) {
+                    switch ($r.Type) {
+                        "Location" { "Location restricted" }
+                        "Zone" { "Zone restricted" }
+                        default { $r.Type }
+                    }
+                } else {
+                    "Restricted"
+                }
+                
+                $zoneList = [string]::Join(',', ($restrictedZones | Select-Object -Unique))
+                $entries += ("Zones ${zoneList}: ${reason}")  # Fixed: Using ${} for variables
+            }
+            
+            # Check for capacity restrictions
+            if ($r.Values) {
+                foreach ($v in $r.Values) {
+                    if ($v.Name -eq "NotAvailableForZones") {
+                        $entries += ("Capacity not available in zones: $([string]::Join(',', $v.Value))")
+                    }
+                }
             }
         }
-        else {
-            $isAvailableResult = $providerExists.ResourceTypes | Where-Object {
-                Is-ServiceAvailableInRegion -ServiceInfo $_ -NormalizedRegion $NormalizedRegion
+    }
+
+    if ($entries.Count -eq 0) { return "None" }
+    return ([string]::Join('; ', ($entries | Select-Object -Unique)))
+}
+
+# --- NEW HELPER: determine if region supports availability zones and how many ---
+function Get-RegionZoneInfo {
+    <#
+    .SYNOPSIS
+        Determines whether a region supports availability zones and returns the count/list.
+
+    .PARAMETER Region
+        The normalized region name to inspect (e.g., "westus2").
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Region
+    )
+
+    try {
+        # Use Get-AzLocation to get region metadata
+        $location = Get-AzLocation | Where-Object { $_.Location -ieq $Region }
+        $zoneList = @()
+        $supportsZones = $false
+
+        if ($location -and $location.Metadata) {
+            # Try to get zones from Metadata property
+            if ($location.Metadata.Zones) {
+                $zoneList = $location.Metadata.Zones
+            } elseif ($location.Metadata.ZoneDetails) {
+                # Some regions use ZoneDetails
+                $zoneList = $location.Metadata.ZoneDetails.Zones
             }
-            $isAvailable = ($isAvailableResult.Count -gt 0)
-            return [PSCustomObject]@{
-                ResourceProvider = $Provider
-                Region = $NormalizedRegion
-                Available = $isAvailable
-                Error = if (-not $isAvailable) { "No service types available in region" } else { $null }
+            $zoneList = $zoneList | Where-Object { $_ -ne $null -and $_ -ne "" } | Select-Object -Unique
+            $supportsZones = ($zoneList.Count -gt 0)
+        }
+
+        # Fallback: If no zones found in metadata, try SKU data as a backup
+        if (-not $supportsZones) {
+            if (-not $global:CachedComputeSkus) {
+                $global:CachedComputeSkus = Get-AzComputeResourceSku -Location $Region -ErrorAction Stop
             }
+            $allZones = @()
+            foreach ($sku in $global:CachedComputeSkus) {
+                if ($sku.LocationInfo) {
+                    foreach ($locInfo in $sku.LocationInfo) {
+                        if ($locInfo.Location -ieq $Region) {
+                            if ($locInfo.Zones) {
+                                $allZones += $locInfo.Zones
+                            }
+                        }
+                    }
+                }
+            }
+            $zoneList = ($allZones | Select-Object -Unique) | Where-Object { $_ -ne $null -and $_ -ne "" }
+            $supportsZones = ($zoneList.Count -gt 0)
+        }
+
+        $sortedZones = Sort-Zones -Zones $zoneList
+        $zoneCount = $sortedZones.Count
+
+        return [PSCustomObject]@{
+            SupportsZones = $supportsZones
+            ZoneCount = $zoneCount
+            Zones = $sortedZones
+        }
+    }
+    catch {
+        Write-Log "Get-RegionZoneInfo error for region '$Region': $_" -Level "Warning"
+        return [PSCustomObject]@{
+            SupportsZones = $false
+            ZoneCount = 0
+            Zones = @()
         }
     }
 }
 
 # ==============================================================================
 # 3. HELPER FUNCTIONS
-#    These functions assist the core logic.
 # ==============================================================================
 
 function Get-ResourceProviderInfo {
@@ -515,9 +598,93 @@ function Is-ServiceAvailableInRegion {
     return $normalizedLocations -contains $checkRegion -or $locations -contains '*'
 }
 
+# Helper to determine if a resource provider/service is available in a region
+function Determine-ProviderAvailability {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Provider,
+        [Parameter(Mandatory = $true)]
+        [string]$NormalizedRegion,
+        [Parameter(Mandatory = $true)]
+        [object[]]$AvailableProviders
+    )
+    $info = Get-ResourceProviderInfo -ProviderString $Provider
+    $namespace = $info.Namespace
+    $serviceType = $info.ServiceType
+
+    $providerObj = $AvailableProviders | Where-Object { $_.ProviderNamespace -ieq $namespace }
+    if (-not $providerObj) {
+        return [PSCustomObject]@{
+            ResourceProvider = $Provider
+            Region = $NormalizedRegion
+            Available = $false
+            Error = "Provider namespace not found"
+        }
+    }
+
+    # Helper to check if a resource type is global
+    function Is-GlobalResourceType($resourceTypeObj) {
+        if ($null -eq $resourceTypeObj -or -not $resourceTypeObj.Locations) { return $false }
+        $locations = $resourceTypeObj.Locations | ForEach-Object { $_.ToLower() }
+        # If only "global" or "global" and "*" are present, treat as global
+        return ($locations -contains "global" -and ($locations | Where-Object { $_ -ne "global" -and $_ -ne "*" }).Count -eq 0)
+    }
+
+    if ($serviceType) {
+        $resourceType = $providerObj.ResourceTypes | Where-Object { $_.ResourceTypeName -ieq $serviceType }
+        if (-not $resourceType) {
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = $NormalizedRegion
+                Available = $false
+                Error = "Resource type not found in provider"
+            }
+        }
+        if (Is-GlobalResourceType $resourceType) {
+            return [PSCustomObject]@{
+                ResourceProvider = $Provider
+                Region = "Global Service"
+                Available = $true
+                Error = $null
+            }
+        }
+        $isAvailable = Is-ServiceAvailableInRegion -ServiceInfo $resourceType -NormalizedRegion $NormalizedRegion
+        return [PSCustomObject]@{
+            ResourceProvider = $Provider
+            Region = $NormalizedRegion
+            Available = $isAvailable
+            Error = $null
+        }
+    } else {
+        # Provider-level check: available if any resource type is available in region
+        foreach ($rt in $providerObj.ResourceTypes) {
+            if (Is-GlobalResourceType $rt) {
+                return [PSCustomObject]@{
+                    ResourceProvider = $Provider
+                    Region = "Global Service"
+                    Available = $true
+                    Error = $null
+                }
+            }
+        }
+        $anyAvailable = $false
+        foreach ($rt in $providerObj.ResourceTypes) {
+            if (Is-ServiceAvailableInRegion -ServiceInfo $rt -NormalizedRegion $NormalizedRegion) {
+                $anyAvailable = $true
+                break
+            }
+        }
+        return [PSCustomObject]@{
+            ResourceProvider = $Provider
+            Region = $NormalizedRegion
+            Available = $anyAvailable
+            Error = $null
+        }
+    }
+}
+
 # ==============================================================================
 # 4. UTILITY & UI FUNCTIONS
-#    These functions handle user interaction and output formatting.
 # ==============================================================================
 
 function Show-Banner {
@@ -618,11 +785,15 @@ function Format-OutputTable {
 
     .PARAMETER Region
         The region that was checked.
+
+    .PARAMETER RegionZoneInfo
+        The region availability zone information.
     #>
     param (
         [PSCustomObject]$ProviderResults,
         [PSCustomObject]$SkuResults,
-        [string]$Region
+        [string]$Region,
+        [PSCustomObject]$RegionZoneInfo
     )
     
     # Define colors for output
@@ -630,6 +801,19 @@ function Format-OutputTable {
     $redText = "`e[31m"
     $yellowText = "`e[33m"
     $resetText = "`e[0m"
+
+    # --- NEW: display region availability zone summary ---
+    Write-Host "`n═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "Region Availability Zones for '$Region'" -ForegroundColor Cyan
+    Write-Host "═══════════════════════════════════════════════════════════`n" -ForegroundColor Cyan
+
+    if ($RegionZoneInfo -and $RegionZoneInfo.SupportsZones) {
+        $zonesList = if ($RegionZoneInfo.Zones -and $RegionZoneInfo.Zones.Count -gt 0) { [string]::Join(', ', $RegionZoneInfo.Zones) } else { "N/A" }
+        Write-Host ("This region appears to support availability zones. Zones detected: {0}  ( {1} )" -f $RegionZoneInfo.ZoneCount, $zonesList) -ForegroundColor Green
+    }
+    else {
+        Write-Host "This region does NOT appear to support availability zones (no zones detected for compute SKUs)." -ForegroundColor Yellow
+    }
 
     # --- Output Resource Provider Table ---
     Write-Host "`n═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
@@ -653,43 +837,69 @@ function Format-OutputTable {
         }
     } | Format-Table -AutoSize -Wrap
 
-    # --- Output VM SKU Table ---
+    # --- Output VM SKU Table with enhanced AZ information ---
     Write-Host "`n═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
-    Write-Host "VM SKU Availability & Quota Results for '$Region'" -ForegroundColor Cyan
+    Write-Host "VM SKU Availability, AZ Support & Quota Results for '$Region'" -ForegroundColor Cyan
     Write-Host "═══════════════════════════════════════════════════════════`n" -ForegroundColor Cyan
 
-    $skuResults | ForEach-Object {
-        $isAvailable = $_.Available
-        $availableText = if ($isAvailable -is [bool]) {
-            if ($isAvailable) { "$greenText True $resetText" } else { "$redText False $resetText" }
-        } else {
-            $isAvailable
-        }
-        
-        $delta = $_.Delta
-        $deltaText = if ($delta -ne $null -and $delta -lt 0) {
-            "$redText$delta$resetText"
-        } elseif ($delta -ne $null -and $delta -ge 0) {
-            "$greenText$delta$resetText"
-        } else {
-            "N/A"
-        }
-        
-        $errorText = if ($_.Error) { "$yellowText$($_.Error)$resetText" } else { "" }
-        
-        [PSCustomObject]@{
-            Workload = $_.Workload
-            SKU = $_.SKU
-            Region = $_.Region
-            Available = $availableText
-            "Quota Available" = $_."Quota Available"
-            "Used Cores" = $_."Used Cores"
-            "Required Cores" = $_."Required Cores"
-            "Available Cores" = $deltaText
-            Error = $errorText
-        }
-    } | Format-Table -AutoSize -Wrap
+    # Group SKUs by AZ support status for better readability
+    $groupedSkus = $skuResults | Group-Object -Property { $_."AZ Support" }
     
+    foreach ($group in $groupedSkus | Sort-Object { 
+        switch($_.Name) {
+            "All" { 1 }
+            "Some" { 2 }
+            "None" { 3 }
+            "SKU reports zones" { 4 }
+            default { 5 }
+        }
+    }) {
+        $group.Group | ForEach-Object {
+            $isAvailable = $_.Available
+            $availableText = if ($isAvailable -is [bool]) {
+                if ($isAvailable) { "$greenText True $resetText" } else { "$redText False $resetText" }
+            } else {
+                $isAvailable
+            }
+            
+            $delta = $_.Delta
+            $deltaText = if ($delta -ne $null -and $delta -lt 0) {
+                "$redText$delta$resetText"
+            } elseif ($delta -ne $null -and $delta -ge 0) {
+                "$greenText$delta$resetText"
+            } else { "N/A" }
+            
+            # Color and format AZ-related fields
+            $azZonesDisplay = if ($_."AZ Zones" -eq "N/A") { 
+                "$yellowText$($_."AZ Zones")$resetText" 
+            } else { 
+                "$greenText$($_."AZ Zones")$resetText" 
+            }
+
+            $azRestrRaw = if ($_.PSObject.Properties.Match('AZ Restrictions').Count -gt 0) { $_."AZ Restrictions" } else { "None" }
+            $azRestrDisplay = switch -Regex ($azRestrRaw) {
+                '(?i)None|^N/?A$' { "$greenText$azRestrRaw$resetText" }
+                '(?i)NotAvailableForSubscription|ZoneRestricted' { "$redText$azRestrRaw$resetText" }
+                default { "$yellowText$azRestrRaw$resetText" }
+            }
+
+            $errorText = if ($_.Error) { "$yellowText$($_.Error)$resetText" } else { "" }
+
+            [PSCustomObject]@{
+                Workload = $_.Workload
+                SKU = $_.SKU
+                Available = $availableText
+                "AZ Zones Available" = $azZonesDisplay
+                "AZ Restrictions" = $azRestrDisplay
+                "Quota Available" = $_."Quota Available"
+                "Used Cores" = $_."Used Cores"
+                "Required Cores" = $_."Required Cores"
+                "Available Cores" = $deltaText
+                Error = $errorText
+            }
+        } | Format-Table -AutoSize -Wrap
+    }
+
     # Display summary
     Write-Host "`nSummary:" -ForegroundColor Yellow
     Write-Host "════════" -ForegroundColor Yellow
@@ -698,6 +908,20 @@ function Format-OutputTable {
     Write-Host "Total VM SKUs Checked: " -NoNewline
     Write-Host $SkuResults.Count -ForegroundColor Cyan
     Write-Host ""
+}
+
+# Helper to sort and deduplicate zone IDs (e.g., ["2","1","3"] => ["1","2","3"])
+function Sort-Zones {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Zones
+    )
+    # Remove null/empty, deduplicate, sort numerically then lexically
+    $Zones | Where-Object { $_ -ne $null -and $_ -ne "" } | 
+        Select-Object -Unique | 
+        Sort-Object { 
+            if ($_ -match '^\d+$') { [int]$_ } else { $_ }
+        }
 }
 
 # ==============================================================================
