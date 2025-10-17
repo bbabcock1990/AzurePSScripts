@@ -56,7 +56,6 @@ $global:VmSkusToCheck = @(
     @{ SKUName = "Standard_D4as_v5"; Cores = 4; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
     @{ SKUName = "Standard_D8as_v4"; Cores = 8; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
     @{ SKUName = "Standard_D4as_v4"; Cores = 4; ResourceType = "virtualMachines"; Workload = "AKS node pools" },
-    @{ SKUName = "Standard_D2ds_v4"; Cores = 2; ResourceType = "MySqlFlexibleServers"; Workload = "MySQL DB" },
     @{ SKUName = "Standard_D4as_v6"; Cores = 4; ResourceType = "virtualMachines"; Workload = "Kafka VM" },
     @{ SKUName = "Standard_D8as_v5"; Cores = 8; ResourceType = "virtualMachines"; Workload = "Kafka VM" },
     @{ SKUName = "Standard_B8ms"; Cores = 8; ResourceType = "virtualMachines"; Workload = "Jenkins Agent VM" }
